@@ -6,12 +6,12 @@ from tkinter import ttk, messagebox
 
 UDP_PORT = 8888
 MESSAGE = b"BATTERY_QUERY"
-TIMEOUT = 0.05 # Velmi krátký timeout pro každou IP, aby sken netrval věčnost
+SCAN_TIMEOUT = 2.0  # Celkový čas, po který budeme čekat na odpovědi od všech
 
 class BatteryMonitorApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Battery Monitor (Deep Scan)")
+        self.root.title("Battery Monitor (Fast Scan)")
         self.root.geometry("650x400")
 
         style = ttk.Style()
@@ -23,7 +23,7 @@ class BatteryMonitorApp:
         ctrl_frame = ttk.Frame(main_frame)
         ctrl_frame.pack(fill=tk.X, pady=(0, 10))
 
-        self.btn_scan = ttk.Button(ctrl_frame, text="🔍 Hloubkový sken sítě", command=self.start_scan_thread)
+        self.btn_scan = ttk.Button(ctrl_frame, text="🚀 Síťový sken", command=self.start_scan_thread)
         self.btn_scan.pack(side=tk.LEFT, padx=5)
 
         self.status_label = ttk.Label(ctrl_frame, text="Připraven", font=('Segoe UI', 9))
@@ -43,51 +43,68 @@ class BatteryMonitorApp:
 
     def start_scan_thread(self):
         self.btn_scan.state(['disabled'])
+        self.status_label.config(text="Skenuji síť...")
         for i in self.tree.get_children(): self.tree.delete(i)
-        threading.Thread(target=self.deep_scan, daemon=True).start()
+        threading.Thread(target=self.run_fast_scan, daemon=True).start()
 
-    def deep_scan(self):
-        found_devices = []
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(TIMEOUT)
-
+    def check_ip(self, ip, results):
+        """Funkce pro jedno vlákno: pošle dotaz a čeká na odpověď."""
         try:
-            # Zjištění lokální sítě
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(SCAN_TIMEOUT)
+                sock.sendto(MESSAGE, (ip, UDP_PORT))
+                
+                data, addr = sock.recvfrom(1024)
+                parts = data.decode('utf-8').split('|')
+                if len(parts) == 3:
+                    is_charging = parts[2].lower() == "true"
+                    status = "⚡ Nabíjí se" if is_charging else "🔋 Vybíjí se"
+                    results.append((addr[0], parts[0], f"{parts[1]}%", status, is_charging))
+        except (socket.timeout, OSError):
+            pass
+
+    def run_fast_scan(self):
+        found_devices = []
+        threads = []
+
+        # Zjištění lokální sítě
+        try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                 s.connect(("8.8.8.8", 80))
                 local_ip = s.getsockname()[0]
             
             prefix = ".".join(local_ip.split(".")[:-1])
-            self.root.after(0, lambda: self.status_label.config(text=f"Skenuji síť {prefix}.X ..."))
-
-            # Skenování všech IP adres v podsíti (1 až 254)
+            
+            # Vytvoření vlákna pro každou IP adresu (1-254)
             for i in range(1, 255):
                 target_ip = f"{prefix}.{i}"
-                if target_ip == local_ip: continue # Přeskočit sebe
+                if target_ip == local_ip: continue
                 
-                sock.sendto(MESSAGE, (target_ip, UDP_PORT))
-                
-                # Zkusíme krátce počkat, jestli někdo odpoví
-                try:
-                    data, addr = sock.recvfrom(1024)
-                    parts = data.decode('utf-8').split('|')
-                    if len(parts) == 3:
-                        status = "⚡ Nabíjí se" if parts[2].lower() == "true" else "🔋 Vybíjí se"
-                        found_devices.append((addr[0], parts[0], f"{parts[1]}%", status, parts[2].lower() == "true"))
-                except socket.timeout:
-                    continue
-                
+                t = threading.Thread(target=self.check_ip, args=(target_ip, found_devices))
+                threads.append(t)
+                t.start()
+
+            # Počkáme, až všechna vlákna skončí (nebo vyprší SCAN_TIMEOUT v nich)
+            for t in threads:
+                t.join(timeout=0.1) # Rychlé prolnutí
+
+            # Krátká pauza pro jistotu, aby doběhly i ty nejpomalejší odpovědi
+            time.sleep(SCAN_TIMEOUT)
+
         except Exception as e:
             self.root.after(0, lambda: messagebox.showerror("Chyba", str(e)))
         finally:
-            sock.close()
             self.root.after(0, lambda: self.update_ui(found_devices))
 
     def update_ui(self, devices):
-        for ip, name, batt, status, charging in devices:
-            self.tree.insert('', tk.END, values=(ip, name, batt, status), tags=('charging' if charging else ''))
+        # Odstranění duplicit (pokud by nějaké vznikly) a seřazení
+        unique_devices = list(set(devices))
+        for ip, name, batt, status, charging in unique_devices:
+            self.tree.insert('', tk.END, values=(ip, name, batt, status), 
+                             tags=('charging' if charging else ''))
+        
         self.btn_scan.state(['!disabled'])
-        self.status_label.config(text=f"Hotovo. Nalezeno: {len(devices)}")
+        self.status_label.config(text=f"Dokončeno. Nalezeno zařízení: {len(unique_devices)}")
 
 if __name__ == "__main__":
     root = tk.Tk()

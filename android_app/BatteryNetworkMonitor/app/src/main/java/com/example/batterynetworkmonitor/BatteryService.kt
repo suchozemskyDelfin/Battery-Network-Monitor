@@ -20,8 +20,18 @@ class BatteryService : Service() {
     private var multicastLock: WifiManager.MulticastLock? = null
     private var cpuWakeLock: PowerManager.WakeLock? = null
 
+    // Konstanta pro akci vypnutí
+    companion object {
+        const val ACTION_STOP = "STOP_BATTERY_SERVICE"
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Okamžité vytvoření notifikace pro Foreground Service
+        // Pokud uživatel klikl na "Vypnout" v notifikaci
+        if (intent?.action == ACTION_STOP) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         startForeground(1, createNotification())
         startUdpServer()
         return START_STICKY
@@ -30,12 +40,10 @@ class BatteryService : Service() {
     private fun startUdpServer() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
 
-        // 1. CPU WAKE LOCK - udržuje procesor naživu na pozadí
         cpuWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "BatteryMonitor:CpuLock").apply {
             acquire()
         }
 
-        // 2. MULTICAST LOCK - nezbytné pro příjem UDP broadcastů na Xiaomi
         val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         multicastLock = wm.createMulticastLock("BatteryLock").apply {
             setReferenceCounted(true)
@@ -44,30 +52,32 @@ class BatteryService : Service() {
 
         serviceScope.launch {
             try {
-                socket = DatagramSocket(8888)
+                // Používáme reuseAddress, aby se port rychle uvolnil pro další start
+                socket = DatagramSocket(8888).apply { reuseAddress = true }
                 val buffer = ByteArray(1024)
 
                 while (isActive) {
                     val packet = DatagramPacket(buffer, buffer.size)
-                    socket?.receive(packet) // Zde služba čeká na paket z PC
-
-                    val message = String(packet.data, 0, packet.length)
-                    if (message == "BATTERY_QUERY") {
-                        // Jakmile přijde dotaz, zkusíme "nakopnout" displej
-                        forceWakeScreen()
-                        sendBatteryStatus(packet.address, packet.port)
+                    try {
+                        socket?.receive(packet)
+                        val message = String(packet.data, 0, packet.length)
+                        if (message == "BATTERY_QUERY") {
+                            forceWakeScreen()
+                            sendBatteryStatus(packet.address, packet.port)
+                        }
+                    } catch (e: Exception) {
+                        // Socket closed vyvolá výjimku při ukončení, to je v pořádku
+                        if (isActive) Log.e("BatteryService", "Receive error: ${e.message}")
                     }
                 }
             } catch (e: Exception) {
-                Log.e("BatteryService", "UDP Error: ${e.message}")
+                Log.e("BatteryService", "UDP Server error: ${e.message}")
             }
         }
     }
 
     private fun forceWakeScreen() {
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-
-        // FULL_WAKE_LOCK s ACQUIRE_CAUSES_WAKEUP by měl rozsvítit displej i na zamčeném Xiaomi
         @Suppress("DEPRECATION")
         val screenLock = pm.newWakeLock(
             PowerManager.FULL_WAKE_LOCK or
@@ -75,8 +85,6 @@ class BatteryService : Service() {
                     PowerManager.ON_AFTER_RELEASE,
             "BatteryMonitor:ForceWake"
         )
-
-        // Rozsvítíme na 3 vteřiny, což stačí na odeslání síťové odpovědi
         if (!screenLock.isHeld) {
             screenLock.acquire(3000)
         }
@@ -106,22 +114,34 @@ class BatteryService : Service() {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             val channel = NotificationChannel(channelId, "Monitor Baterie", NotificationManager.IMPORTANCE_LOW)
             val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+            manager?.createNotificationChannel(channel)
         }
 
+        // Vytvoření úmyslu pro tlačítko "Vypnout"
+        val stopIntent = Intent(this, BatteryService::class.java).apply {
+            action = ACTION_STOP
+        }
+        val stopPendingIntent = PendingIntent.getService(
+            this, 0, stopIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
         return NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Služba sledování sítě")
-            .setContentText("Aplikace naslouchá na portu 8888")
+            .setContentTitle("Sledování baterie aktivní")
+            .setContentText("PC se může dotazovat na stav")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Vypnout", stopPendingIntent) // Tlačítko v notifikaci
             .build()
     }
 
     override fun onDestroy() {
-        serviceScope.cancel()
+        Log.d("BatteryService", "Ukončování služby...")
+        serviceScope.cancel() // Zastaví všechny coroutiny (včetně UDP smyčky)
         socket?.close()
+
         if (multicastLock?.isHeld == true) multicastLock?.release()
         if (cpuWakeLock?.isHeld == true) cpuWakeLock?.release()
+
         super.onDestroy()
     }
 
