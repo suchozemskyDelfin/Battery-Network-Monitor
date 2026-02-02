@@ -116,7 +116,13 @@ class BatteryService : Service() {
             val manager = getSystemService(NotificationManager::class.java)
             manager?.createNotificationChannel(channel)
         }
+        val contentIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP // Aby se neotevíralo nové okno, pokud už je otevřené
+        }
 
+        val contentPendingIntent = PendingIntent.getActivity(
+            this, 0, contentIntent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
         // Vytvoření úmyslu pro tlačítko "Vypnout"
         val stopIntent = Intent(this, BatteryService::class.java).apply {
             action = ACTION_STOP
@@ -130,9 +136,11 @@ class BatteryService : Service() {
             .setContentText("PC se může dotazovat na stav")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Vypnout", stopPendingIntent) // Tlačítko v notifikaci
+            .setContentIntent(contentPendingIntent) // Přidá akci na klepnutí na celou notifikaci
+            .setAutoCancel(false) // Notifikace nezmizí po kliknutí, protože je Foreground
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Vypnout", stopPendingIntent)
             .build()
-    }
+            }
 
     override fun onDestroy() {
         Log.d("BatteryService", "Ukončování služby...")
